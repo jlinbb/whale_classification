@@ -1,0 +1,4 @@
+test/
+train/
+train.csv
+.ipynb_checkpoints/
