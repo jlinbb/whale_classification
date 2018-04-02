@@ -1,4 +1,4 @@
-##CSIT-5800 Mini Project Proposal Report
+## CSIT-5800 Mini Project Proposal Report
 
 **Group 3: GUO,Yuchen, LI, Can, LIN, Jiajun, LUO, Xiaoyuan**
 
@@ -28,7 +28,7 @@ l  sample_submission.csv -a sample submission file in the correct format.
 
  
 
-###Challenge and Output
+### Challenge and Output
 
 What makes this such achallenge is that there are only a few examples for each of 3,000+ whale Ids.
 
