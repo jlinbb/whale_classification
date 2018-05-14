@@ -3,12 +3,11 @@ from sklearn.model_selection import train_test_split
 from keras import backend as K
 from keras.applications.resnet50 import ResNet50
 from keras.layers import Conv2D, MaxPool2D, Input, Dense, Flatten, Dropout, GlobalMaxPooling2D, Lambda
-from keras.callbacks import ModelCheckpoint, LearningRateScheduler, EarlyStopping, ReduceLROnPlateau, TensorBoard
+from keras.callbacks import ModelCheckpoint, EarlyStopping
 from keras.optimizers import Adam
 from keras.layers import merge
 from PIL import Image
 from keras.models import Model
-from sklearn.metrics.pairwise import euclidean_distances
 from sklearn.neighbors import NearestNeighbors
 import pandas as pd
 import numpy as np
@@ -78,7 +77,7 @@ test_generator = SampleGenerator(test_filename_label_dict)
 # print(test_generator.get_sample())
 
 
-# =================== Generate triplet tuple ===================
+# =================== Build model ===================
 class BuildModel():
     def __init__(self):
         self.batch_size = 8
@@ -88,7 +87,7 @@ class BuildModel():
     def identity_loss(self, y_true, y_pred):
         return K.mean(y_pred - 0 * y_true)
 
-    def bpr_triplet_loss(self, X):
+    def triplet_loss(self, X):
         positive_item_latent, negative_item_latent, user_latent = X
 
         # loss
@@ -97,81 +96,6 @@ class BuildModel():
             K.sum(user_latent * negative_item_latent, axis=-1, keepdims=True)
         )
         return loss
-
-    # Use ResNet as base model
-    def get_base_model(self):
-        latent_dim = 50
-        base_model = ResNet50(include_top=False, weights='imagenet')
-        x = base_model.output
-        x = GlobalMaxPooling2D()(x)
-        x = Dropout(0.5)(x)
-        dense_1 = Dense(latent_dim)(x)
-        normalized = Lambda(lambda  x: K.l2_normalize(x, axis=1))(dense_1)
-        base_model = Model(base_model.input, normalized, name='Base')
-        return base_model
-
-    def build_model(self):
-        base_model = self.get_base_model()
-
-        positive_example_1 = Input(self.input_shape + (3, ), name='positive_1')
-        negative_example = Input(self.input_shape + (3, ), name='negative')
-        positive_example_2 = Input(self.input_shape + (3, ), name='positive_2')
-
-        positive_example_1_out = base_model(positive_example_1)
-        negative_example_out = base_model(negative_example)
-        positive_example_2_out = base_model(positive_example_2)
-        loss = merge(
-            [positive_example_1_out, negative_example_out, positive_example_2_out],
-            mode=self.bpr_triplet_loss,
-            name='loss',
-            output_shape=(1, )
-        )
-
-        model = Model(
-            inputs=[positive_example_1, negative_example, positive_example_2],
-            outputs=loss
-        )
-        model.compile(loss=self.identity_loss, optimizer=Adam(0.0001))
-        print(model.summary())
-        return model
-
-    def build_inference_model(self, weight_path=file_path):
-        base_model = self.get_base_model()
-        positive_example_1 = Input(self.input_shape + (3,), name='positive_example_1')
-        negative_example = Input(self.input_shape + (3,), name='negative_example')
-        positive_example_2 = Input(self.input_shape + (3,), name='positive_example_2')
-
-        positive_example_1_out = base_model(positive_example_1)
-        negative_example_out = base_model(negative_example)
-        positive_example_2_out = base_model(positive_example_2)
-
-        loss = merge(
-            [positive_example_1_out, negative_example_out, positive_example_2_out],
-            mode=self.bpr_triplet_loss,
-            name='loss',
-            output_shape=(1,))
-
-        model = Model(
-            input=[positive_example_1, negative_example, positive_example_2],
-            output=loss)
-        model.compile(loss=self.identity_loss, optimizer=Adam(0.0001))
-
-        model.load_weights(weight_path)
-        inference_model = Model(base_model.get_input_at(0), outputs=base_model.get_output_at(0))
-        inference_model.compile(loss='mse', optimizer=Adam(0.0001))
-        print(inference_model.summary())
-        return inference_model
-
-    def read_and_resize(self, filepath):
-        img = Image.open((filepath)).convert('RGB')
-        img = img.resize(self.input_shape)
-        img_array = np.array(img, dtype='uint8')[..., ::-1]
-        return np.array(img_array/ (np.max(img_array) + 0.001), dtype='float32')
-
-    def augment(self, img_array):
-        if np.random.uniform(0, 1) > 0.9:
-            img_array = np.fliplr(img_array)
-        return img_array
 
     def gen(self, triplet_gen):
         while True:
@@ -199,6 +123,33 @@ class BuildModel():
             list_positive_examples_2 = np.array(list_positive_examples_2)
             yield [list_positive_examples_1, list_negative_examples, list_positive_examples_2], np.ones(self.batch_size)
 
+    # Use ResNet as base model
+    def get_base_model(self):
+        latent_dim = 50
+        base_model = ResNet50(include_top=False, weights='imagenet')
+        x = base_model.output
+        x = GlobalMaxPooling2D()(x)
+        x = Dropout(0.5)(x)
+        dense_1 = Dense(latent_dim)(x)
+        normalized = Lambda(lambda x: K.l2_normalize(x, axis=1))(dense_1)
+        dense_2 = Dense(latent_dim)(normalized)
+        normalized_2 = Lambda(lambda x: K.l2_normalize(x, axis=1))(dense_2)
+        base_model = Model(base_model.input, normalized_2, name='Base')
+        return base_model
+
+
+    def read_and_resize(self, filepath):
+        img = Image.open((filepath)).convert('RGB')
+        img = img.resize(self.input_shape)
+        img_array = np.array(img, dtype='uint8')[..., ::-1]
+        return np.array(img_array/ (np.max(img_array) + 0.001), dtype='float32')
+
+    def augment(self, img_array):
+        if np.random.uniform(0, 1) > 0.9:
+            img_array = np.fliplr(img_array)
+        return img_array
+
+
     def data_generator(self, fpaths, batch=16):
         i = 0
         imgs, fnames = [], []
@@ -222,86 +173,113 @@ class BuildModel():
 if __name__ == '__main__':
     bm = BuildModel()
 
-    # model_1 = bm.build_model()
-    # checkpoint = ModelCheckpoint(file_path, monitor='val_loss', verbose=1, save_best_only=True, mode='min')
-    # early = EarlyStopping(monitor='val_loss', mode='min', patience=2)
-    # callbacks_list = [checkpoint, early]
-    #
-    # history = model_1.fit_generator(
-    #     bm.gen(train_generator),
-    #     validation_data=bm.gen(test_generator),
-    #     epochs=3,
-    #     verbose=2,
-    #     workers=4,
-    #     use_multiprocessing=True,
-    #     callbacks=callbacks_list,
-    #     steps_per_epoch=300,
-    #     validation_steps=30
-    # )
+# ====================== train ======================
+    base_model = bm.get_base_model()
+
+    positive_example_1 = Input(bm.input_shape + (3,), name='positive_1')
+    negative_example = Input(bm.input_shape + (3,), name='negative')
+    positive_example_2 = Input(bm.input_shape + (3,), name='positive_2')
+
+    positive_example_1_out = base_model(positive_example_1)
+    negative_example_out = base_model(negative_example)
+    positive_example_2_out = base_model(positive_example_2)
+    loss = merge(
+        [positive_example_1_out, negative_example_out, positive_example_2_out],
+        mode=bm.triplet_loss,
+        name='loss',
+        output_shape=(1,)
+    )
+
+    model = Model(
+        inputs=[positive_example_1, negative_example, positive_example_2],
+        outputs=loss
+    )
+    model.compile(loss=bm.identity_loss, optimizer=Adam(0.0001))
+    print(model.summary())
+
+    checkpoint = ModelCheckpoint(file_path, monitor='val_loss', verbose=1, save_best_only=True, mode='min')
+    early = EarlyStopping(monitor='val_loss', mode='min', patience=2)
+    callbacks_list = [checkpoint, early]
+
+    if (not os.path.exists(file_path)):
+        model.fit_generator(
+            bm.gen(train_generator),
+            validation_data=bm.gen(test_generator),
+            epochs=8,
+            verbose=2,
+            workers=4,
+            use_multiprocessing=True,
+            callbacks=callbacks_list,
+            steps_per_epoch=300,
+            validation_steps=30
+        )
+    else:
+        model.load_weights(file_path)
+
+# ====================== predict ======================
 
     file_id_mapping = {k: v for k, v in zip(data.Image.values, data.Id.values)}
-    inference_model = bm.build_inference_model()
     train_files = glob.glob('train/*.jpg')
     test_files = glob.glob('test/*.jpg')
 
     train_preds = []
     train_file_names = []
+
     i = 1
     for fnames, imgs in bm.data_generator(train_files, batch=32):
-        print('Reading complete: ', i * 32 / len(train_files) * 100, '%')
         i += 1
-        predicts = inference_model.predict(imgs)
-        print(fnames, predicts)
+        predicts = base_model.predict(imgs)
         predicts = predicts.tolist()
         train_preds += predicts
         train_file_names += fnames
+        print('Train data computing complete: ', round(i * 32 / len(train_files) * 100, 0), '%')
 
-    # train_preds = np.array(train_preds)
-    #
-    # test_preds = []
-    # test_file_names = []
-    # i = 1
-    # for fnames, imgs in bm.data_generator(test_files, batch=32):
-    #     print(i * 32 / len(test_files) * 100)
-    #     i += 1
-    #     predicts = inference_model.predict(imgs)
-    #     predicts = predicts.tolist()
-    #     test_preds += predicts
-    #     test_file_names += fnames
-    #
-    # test_preds = np.array(test_preds)
-    #
-    #
-    #
-    # neigh = NearestNeighbors(n_neighbors=6)
-    # neigh.fit(train_preds)
-    # distances, neighbors = neigh.kneighbors(train_preds)
-    #
-    # print(distances, neighbors)
-    #
-    # distances_test, neighbors_test = neigh.kneighbors(test_preds)
-    #
-    # distances_test, neighbors_test = distances_test.tolist(), neighbors_test.tolist()
-    #
-    # preds_str = []
-    #
-    # for filepath, distance, neighbour_ in zip(test_file_names, distances_test, neighbors_test):
-    #     sample_result = []
-    #     sample_classes = []
-    #     for d, n in zip(distance, neighbour_):
-    #         train_file = train_files[n].split(os.sep)[-1]
-    #         class_train = file_id_mapping[train_file]
-    #         sample_classes.append(class_train)
-    #         sample_result.append((class_train, d))
-    #
-    #     if "new_whale" not in sample_classes:
-    #         sample_result.append(("new_whale", 0.1))
-    #     sample_result.sort(key=lambda x: x[1])
-    #     sample_result = sample_result[:5]
-    #     preds_str.append(" ".join([x[0] for x in sample_result]))
-    #
-    # df = pd.DataFrame(preds_str, columns=["Id"])
-    # df['Image'] = [x.split(os.sep)[-1] for x in test_file_names]
-    # df.to_csv("sub_%s.csv" % model_name, index=False)
+
+    train_preds = np.array(train_preds)
+
+    test_preds = []
+    test_file_names = []
+    i = 1
+    for fnames, imgs in bm.data_generator(test_files, batch=32):
+        i += 1
+        predicts = base_model.predict(imgs)
+        predicts = predicts.tolist()
+        test_preds += predicts
+        test_file_names += fnames
+        print('Test data computing complete: ', round(i * 32 / len(test_files) * 100, 0), '%')
+
+    test_preds = np.array(test_preds)
+
+    neigh = NearestNeighbors(n_neighbors=6)
+    neigh.fit(train_preds)
+    distances, neighbors = neigh.kneighbors(train_preds)
+
+    print('Distance:', distances)
+    print('Neighbors', neighbors)
+
+    distances_test, neighbors_test = neigh.kneighbors(test_preds)
+
+    distances_test, neighbors_test = distances_test.tolist(), neighbors_test.tolist()
+
+    preds_str = []
+
+    for filepath, distance, neighbour_ in zip(test_file_names, distances_test, neighbors_test):
+        sample_result = []
+        sample_classes = []
+        for d, n in zip(distance, neighbour_):
+            train_file = train_files[n].split(os.sep)[-1]
+            class_train = file_id_mapping[train_file]
+            sample_classes.append(class_train)
+            sample_result.append((class_train, d))
+
+        if "new_whale" not in sample_classes:
+            sample_result.append(("new_whale", 0.1))
+        sample_result.sort(key=lambda x: x[1])
+        sample_result = sample_result[:5]
+        preds_str.append(" ".join([x[0] for x in sample_result]))
+
+    df = pd.DataFrame(preds_str, columns=["Id"])
+    df['Image'] = [x.split(os.sep)[-1] for x in test_file_names]
+    df.to_csv("sub.csv", index=False)
 
 
